@@ -1,75 +1,120 @@
-name: Ubuntu RDP (XRDP + Tailscale)
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  rdp:
-    runs-on: ubuntu-latest
+  secure-rdp:
+    runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      - name: Update system
+      - name: Configure Core RDP Settings
         run: |
-          sudo apt update
+          # Enable Remote Desktop and disable Network Level Authentication
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-      - name: Install Desktop + XRDP
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+
+          # Allow incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Admin Rights
         run: |
-          sudo apt install -y xfce4 xfce4-goodies xrdp
+          $password = "mahamSK=-12"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Set XFCE as default session
-          echo xfce4-session > ~/.xsession
+          # If the user exists, reset password
+          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name "RDP" -Password $securePass
+          } else {
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          }
 
-          # Start XRDP
-          sudo systemctl enable xrdp
-          sudo systemctl start xrdp
+          # Add user to Administrators group for full admin rights
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          # Add to Remote Desktop Users for RDP access
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
-      - name: Create RDP user
+      - name: Install Python 3.12.8
         run: |
-          sudo useradd -m rdpuser || true
-          echo "rdpuser:mahamSK=-12" | sudo chpasswd
-          sudo usermod -aG sudo rdpuser
+          $pythonUrl = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe"
+          $installerPath = Join-Path $env:TEMP "python-3.12.8.exe"
 
-      - name: Install Python
-        run: |
-          sudo apt install -y python3 python3-pip
-          python3 --version
-          pip3 --version
+          Invoke-WebRequest -Uri $pythonUrl -OutFile $installerPath
+
+          # Install silently with default settings and add to PATH
+          Start-Process -FilePath $installerPath -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait
+
+          # Verify installation
+          python --version
+          pip --version
 
       - name: Install Tailscale
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = Join-Path $env:TEMP "tailscale.msi"
 
-      - name: Start Tailscale
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+
+          # Force string to avoid System.Object[] issue
+          $installerPath = [string]$installerPath
+
+          # Build one clean string of arguments
+          $arguments = "/i `"$installerPath`" /quiet /norestart"
+
+          Start-Process -FilePath msiexec.exe -ArgumentList $arguments -Wait -NoNewWindow
+
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
         run: |
-          sudo tailscaled --state=mem: &
-          sleep 5
-
-      - name: Authenticate Tailscale
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
         run: |
-          sudo tailscale up \
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
-            --hostname=gh-runner-${{ github.run_id }}
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
-      - name: Get Tailscale IP
+      - name: Maintain Connection
         run: |
-          TS_IP=$(tailscale ip -4)
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          echo "Tailscale IP: $TS_IP"
-
-      - name: Verify XRDP port
-        run: |
-          nc -zv 127.0.0.1 3389
-
-      - name: Keep session alive
-        run: |
-          echo "=== RDP ACCESS ==="
-          echo "Address: $TAILSCALE_IP"
-          echo "Username: rdpuser"
-          echo "Password: mahamSK=-12"
-          echo "=================="
-
-          while true; do
-            echo "[$(date)] RDP Active"
-            sleep 300
-          done
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "==================`n"
+          
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
