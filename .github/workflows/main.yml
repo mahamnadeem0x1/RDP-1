@@ -1,120 +1,26 @@
-name: RDP
+name: Ubuntu CI Secure
 
 on:
-  workflow_dispatch:
+  push:
+    branches: ["main"]
 
 jobs:
-  secure-rdp:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 3600
+
+    env:
+      MY_PASS: "mahamSK=-12"
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show system info
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          uname -a
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-
-          # Allow incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Admin Rights
+      - name: Use password safely
         run: |
-          $password = "mahamSK=-12"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          # If the user exists, reset password
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-              Set-LocalUser -Name "RDP" -Password $securePass
-          } else {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          }
-
-          # Add user to Administrators group for full admin rights
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          # Add to Remote Desktop Users for RDP access
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-
-      - name: Install Python 3.12.8
-        run: |
-          $pythonUrl = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe"
-          $installerPath = Join-Path $env:TEMP "python-3.12.8.exe"
-
-          Invoke-WebRequest -Uri $pythonUrl -OutFile $installerPath
-
-          # Install silently with default settings and add to PATH
-          Start-Process -FilePath $installerPath -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait
-
-          # Verify installation
-          python --version
-          pip --version
-
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = Join-Path $env:TEMP "tailscale.msi"
-
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-
-          # Force string to avoid System.Object[] issue
-          $installerPath = [string]$installerPath
-
-          # Build one clean string of arguments
-          $arguments = "/i `"$installerPath`" /quiet /norestart"
-
-          Start-Process -FilePath msiexec.exe -ArgumentList $arguments -Wait -NoNewWindow
-
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
-
-      - name: Maintain Connection
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "==================`n"
-          
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
+          echo "Password is set (not printing for security)"
+          # Example usage:
+          # some_command --password "$MY_PASS"
